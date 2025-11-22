@@ -812,12 +812,25 @@ impl ConfigToml {
                     network_access,
                     exclude_tmpdir_env_var,
                     exclude_slash_tmp,
-                }) => SandboxPolicy::WorkspaceWrite {
-                    writable_roots: writable_roots.clone(),
-                    network_access: *network_access,
-                    exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
-                    exclude_slash_tmp: *exclude_slash_tmp,
-                },
+                }) => {
+                    let writable_roots = writable_roots
+                        .iter()
+                        .map(|path| {
+                            let absolute = if path.is_absolute() {
+                                path.to_path_buf()
+                            } else {
+                                resolved_cwd.join(path)
+                            };
+                            canonicalize(&absolute).unwrap_or(absolute)
+                        })
+                        .collect();
+                    SandboxPolicy::WorkspaceWrite {
+                        writable_roots,
+                        network_access: *network_access,
+                        exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
+                        exclude_slash_tmp: *exclude_slash_tmp,
+                    }
+                }
                 None => SandboxPolicy::new_workspace_write_policy(),
             },
             SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
@@ -1570,6 +1583,36 @@ trust_level = "trusted"
                 }
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derive_sandbox_policy_canonicalizes_config_writable_roots() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let nested = temp_dir.path().join("workspace").join("project");
+        std::fs::create_dir_all(&nested)?;
+        let non_canonical_root = nested.join("..");
+        let expected_root = canonicalize(&non_canonical_root)?;
+
+        let cfg = ConfigToml {
+            sandbox_mode: Some(SandboxMode::WorkspaceWrite),
+            sandbox_workspace_write: Some(SandboxWorkspaceWrite {
+                writable_roots: vec![non_canonical_root],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let resolution = cfg.derive_sandbox_policy(None, None, temp_dir.path());
+
+        match resolution.policy {
+            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
+                assert_eq!(vec![expected_root], writable_roots);
+            }
+            other => panic!("expected workspace-write policy, got {other:?}"),
+        }
+
+        Ok(())
     }
 
     #[test]
